@@ -1,0 +1,175 @@
+version: "3.9"
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  HITO 1 – Sistema de Tracking de Paquetes (Arquitectura Microservicios)
+#  Servicios: api-gateway | user-service | package-service | tracking-service
+#             postgres-users | postgres-packages | postgres-tracking
+#             prometheus | grafana
+# ════════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Bases de datos (DB por servicio — patrón Database per Service) ──────────
+
+  postgres-users:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: tracker_secret
+      POSTGRES_DB: users_db
+    volumes:
+      - pg_users:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracker -d users_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-packages:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: tracker_secret
+      POSTGRES_DB: packages_db
+    volumes:
+      - pg_packages:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracker -d packages_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-tracking:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: tracker_secret
+      POSTGRES_DB: tracking_db
+    volumes:
+      - pg_tracking:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracker -d tracking_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Microservicios ──────────────────────────────────────────────────────────
+
+  user-service:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DB_HOST: postgres-users
+      DB_PORT: "5432"
+      DB_USER: tracker
+      DB_PASSWORD: tracker_secret
+      DB_NAME: users_db
+    depends_on:
+      postgres-users:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  package-service:
+    build:
+      context: ../services/package-service
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      DB_HOST: postgres-packages
+      DB_PORT: "5432"
+      DB_USER: tracker
+      DB_PASSWORD: tracker_secret
+      DB_NAME: packages_db
+      USER_SERVICE_URL: http://user-service:8001
+      TRACKING_SERVICE_URL: http://tracking-service:8003
+    depends_on:
+      postgres-packages:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      tracking-service:
+        condition: service_healthy
+
+  tracking-service:
+    build:
+      context: ../services/tracking-service
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      DB_HOST: postgres-tracking
+      DB_PORT: "5432"
+      DB_USER: tracker
+      DB_PASSWORD: tracker_secret
+      DB_NAME: tracking_db
+    depends_on:
+      postgres-tracking:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── API Gateway ─────────────────────────────────────────────────────────────
+
+  api-gateway:
+    build:
+      context: ../services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - user-service
+      - package-service
+      - tracking-service
+
+  # ── Observabilidad: Prometheus ──────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    depends_on:
+      - user-service
+      - package-service
+      - tracking-service
+
+  # ── Observabilidad: Grafana ─────────────────────────────────────────────────
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  pg_users:
+  pg_packages:
+  pg_tracking:
+  grafana_data:
